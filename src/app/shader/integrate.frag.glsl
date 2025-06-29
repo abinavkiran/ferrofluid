@@ -9,8 +9,9 @@ uniform sampler2D u_velocityTexture;
 uniform sampler2D u_densityPressureTexture;
 uniform float u_dt;
 uniform float u_frames;
-uniform vec2 u_domainScale;
+uniform vec3 u_domainScale; // Changed to vec3
 uniform float u_zoom;
+uniform float u_audioAgitationStrength; // New uniform
 
 layout(std140) uniform u_PointerParams {
     vec2 pointerPos;
@@ -43,22 +44,23 @@ void main() {
     ivec2 particleTexDimensions = textureSize(u_positionTexture, 0);
     vec4 domainScale = vec4(u_domainScale, 0., 0.);
 
-    vec4 pi = texture(u_positionTexture, v_uv);
-    vec4 vi = texture(u_velocityTexture, v_uv);
-    vec4 fi = texture(u_forceTexture, v_uv);
-    vec4 ri = texture(u_densityPressureTexture, v_uv);
+    vec4 pi = texture(u_positionTexture, v_uv); // pi.xyz is 3D position
+    vec4 vi = texture(u_velocityTexture, v_uv); // vi.xyz is 3D velocity
+    vec4 fi = texture(u_forceTexture, v_uv);    // fi.xyz is 3D force (as per force.frag.glsl output)
+    vec4 ri = texture(u_densityPressureTexture, v_uv); // ri.x is density
 
     // integrate to update the velocity
     float dt = (u_dt * 0.001);
-    float rho = ri.x + 0.000000001;
-    vec4 ai = fi / rho;
-    vi += ai * dt;
+    float rho = ri.x + 0.000000001; // Add epsilon to avoid division by zero
+    vec3 ai_xyz = fi.xyz / rho;    // 3D acceleration
+    vi.xyz += ai_xyz * dt;         // Update 3D velocity
 
-    // apply the pointer force
-    vec4 pointerPos = vec4(pointerPos, 0., 0.);
-    float pr = length(pointerPos.xy * domainScale.xy - pi.xy * domainScale.xy);
+    // apply the pointer force (2D, leave as is for now, affects vi.xy)
+    // pointerPos from UBO is vec2. This creates a vec4 for interaction.
+    vec4 pointerPos_interaction = vec4(pointerPos, 0., 0.);
+    float pr = length(pointerPos_interaction.xy * domainScale.xy - pi.xy * domainScale.xy);
     if (pr < pointerRadius) {
-        vi.xy += pointerVelocity * pointerStrength * (1. - pr / pointerRadius);
+        vi.xy += pointerVelocity.xy * pointerStrength * (1. - pr / pointerRadius); // Ensure pointerVelocity.xy if it's vec2
     }
 
     // apply idle force
@@ -68,18 +70,33 @@ void main() {
         vi.xy += vec2(0.005 * cos(u_frames * 0.01), 0.);
     }
 
-    // update the position
-    pi += (vi + 0.5 * ai * dt) * dt;
+    // Apply audio agitation to velocity (all components xyz)
+    if (u_audioAgitationStrength > 0.0001) { // Check against a small epsilon
+        vec2 seed = v_uv + fract(u_frames * 0.012345f + pi.x + pi.y); // Vary seed more
+        float n1 = rand(seed * 1.23f);
+        float n2 = rand(seed * 2.34f + vec2(0.1f, -0.15f));
+        float n3 = rand(seed * 3.45f + vec2(-0.12f, 0.05f));
+        vec3 random_dir = normalize(vec3(n1*2.0f-1.0f, n2*2.0f-1.0f, n3*2.0f-1.0f));
 
-    // apply nervous wiggle
+        // Add agitation as a direct velocity modification
+        vi.xyz += random_dir * u_audioAgitationStrength;
+    }
+
+    // update the position (using 3D velocity and SPH acceleration)
+    // vi.xyz now contains SPH-updated velocity + pointer/idle effects + audio agitation
+    // ai_xyz is purely from SPH forces for this step
+    pi.xyz += (vi.xyz + 0.5 * ai_xyz * dt) * dt;
+
+    // apply nervous wiggle (2D, leave as is for now, affects pi.xy)
     float zoomForce = noise(pi.xy * 1000. + 500.);
     pi.xy += zoomForce * 0.008 * max(0., (1. - u_zoom * 2.5));
 
-    outPosition = pi;
-    outVelocity = vi;
+    outPosition = pi; // Output full vec4, pi.xyz is updated
+    outVelocity = vi; // Output full vec4, vi.xyz is updated
 
-    // damp the movement on the edges
-    float dim = .9; // damping distance
-    float damping = 1. - max(0., length(pi) - dim);
-    outVelocity *= damping;
+    // damp the movement on the edges - Commented out for floating globule, relying on cohesion.
+    // float dim = .9; // damping distance (in unscaled particle space)
+    // float current_pi_length = length(pi.xyz); // Use .xyz for 3D length
+    // float dampingFactor = 1. - max(0., current_pi_length - dim);
+    // outVelocity.xyz *= dampingFactor; // Apply to .xyz components
 }

@@ -16,8 +16,8 @@ import sortVert from './shader/sort.vert.glsl';
 import sortFrag from './shader/sort.frag.glsl';
 import offsetVert from './shader/offset.vert.glsl';
 import offsetFrag from './shader/offset.frag.glsl';
-import heightMapVert from './shader/height-map.vert.glsl';
-import heightMapFrag from './shader/height-map.frag.glsl';
+// import heightMapVert from './shader/height-map.vert.glsl'; // REMOVED
+// import heightMapFrag from './shader/height-map.frag.glsl'; // REMOVED
 import spikesVert from './shader/spikes.vert.glsl';
 import spikesFrag from './shader/spikes.frag.glsl';
 import testVert from './shader/test.vert.glsl';
@@ -27,6 +27,10 @@ import groundFrag from './shader/ground.frag.glsl';
 import { easeInExpo, easeInOutCubic, easeInOutExpo, easeOutQuint } from "./utils";
 import {isIOS} from './is-ios.js';
 
+// This sketch implements a 3D SPH (Smoothed Particle Hydrodynamics) simulation
+// to create a "floating globule" effect, reacting to audio input.
+// The globule's surface is an icosphere, with vertices displaced (currently via a placeholder
+// audio-driven 'breathing' effect). SPH particles are agitated by audio.
 export class Sketch {
 
     TARGET_FRAME_DURATION = 16;
@@ -48,8 +52,20 @@ export class Sketch {
     zoomOffset = 0;
     targetZoomLerp = 0;
 
-    // resolution of the spikes plane (side segments)
-    planeResolution = 128;
+    // resolution for geometry (e.g., icosphere subdivisions)
+    geometryResolution = 4; // Default subdivisions for icosphere
+
+    displacementParams = { // Base values, can be set by Tweakpane
+        influenceRadius: 0.8,
+        displacementFactor: 0.03,
+    };
+    currentDisplacementFactor = 0.03; // Actual factor used in rendering, modulated by audio
+    currentAudioAgitation = 0.0;    // For SPH particle agitation based on audio
+
+    audioReactiveParams = {
+        displacementBoost: 0.07, // Max displacement boost for globule surface 'breathing' from audio
+        agitationStrength: 0.05, // Max strength of random velocity kick to SPH particles from audio
+    };
 
     // entry animation properties
     entryDelay = 120; // frames
@@ -63,6 +79,7 @@ export class Sketch {
         REST_DENS: 1.8, // rest density
         GAS_CONST: 40, // gas constant
         VISC: 5.5, // viscosity constant
+        COHESION_STRENGTH: 0.05, // Default cohesion strength
 
         // these are calculated from the above constants
         POLY6: 0,
@@ -70,8 +87,9 @@ export class Sketch {
         SPIKY_GRAD: 0,
         VISC_LAP: 0,
 
-        PARTICLE_COUNT: 0, // TODO use instead of NUM_PARTICLES
-        DOMAIN_SCALE: 0,
+        PARTICLE_COUNT: 0,
+        // DOMAIN_SCALE is set in resize() and passed to UBO, not part of this struct directly for UBO population
+        // but this.simulationParams object will have it from this.domainScale before UBO creation.
 
         STEPS: 0
     };
@@ -133,8 +151,8 @@ export class Sketch {
         );
 
         // use a fixed domain scale for this project
-        this.domainScale = vec2.fromValues(8, 8);
-        this.simulationParams.DOMAIN_SCALE = this.domainScale;
+        this.domainScale = vec3.fromValues(8, 8, 8); // Changed to vec3
+        // this.simulationParams.DOMAIN_SCALE = this.domainScale; // DOMAIN_SCALE in UBO is vec2, will need to update shader
         this.simulationParamsNeedUpdate = true;
 
         const needsResize = twgl.resizeCanvasToDisplaySize(this.canvas);
@@ -170,7 +188,7 @@ export class Sketch {
         this.indicesPrg = twgl.createProgramInfo(gl, [indicesVert, indicesFrag]);
         this.sortPrg = twgl.createProgramInfo(gl, [sortVert, sortFrag]);
         this.offsetPrg = twgl.createProgramInfo(gl, [offsetVert, offsetFrag]);
-        this.heightMapPrg = twgl.createProgramInfo(gl, [heightMapVert, heightMapFrag]);
+        // this.heightMapPrg = twgl.createProgramInfo(gl, [heightMapVert, heightMapFrag]); // REMOVED
         this.spikesPrg = twgl.createProgramInfo(gl, [spikesVert, spikesFrag]);
         this.testPrg = twgl.createProgramInfo(gl, [testVert, testFrag]);
         this.groundPrg = twgl.createProgramInfo(gl, [groundVert, groundFrag]);
@@ -183,10 +201,25 @@ export class Sketch {
         // Setup Meshes
         this.quadBufferInfo = twgl.createBufferInfoFromArrays(gl, { a_position: { numComponents: 2, data: [-1, -1, 3, -1, -1, 3] }});
         this.quadVAO = twgl.createVAOAndSetAttributes(gl, this.pressurePrg.attribSetters, this.quadBufferInfo.attribs, this.quadBufferInfo.indices);
-        const spikesArrays = twgl.primitives.createPlaneVertices(1, 1, this.planeResolution, this.planeResolution);
-        this.spikesBufferInfo = twgl.createBufferInfoFromArrays(gl, spikesArrays);
+
+        // Create Icosphere for the globule
+        const icosphereRadius = 0.4; // Base radius of the globule
+        // this.geometryResolution is now used for subdivisions (e.g., 4 or 5)
+        const globuleArrays = twgl.primitives.createGeodesicSphereVertices(icosphereRadius, this.geometryResolution);
+        // Ensure attributes match what spikesPrg expects (a_position, a_normal, a_texcoord if used)
+        // createGeodesicSphereVertices provides 'position' and 'indices'. Normals need to be calculated or will be same as position for a sphere.
+        // For initial displacement, normals are just normalized positions.
+        // Let's add normals explicitly if spikes.vert.glsl uses them.
+        // For now, createGeodesicSphereVertices should provide positions.
+        // We might need to compute normals if they are not implicitly (position / radius).
+        // twgl.primitives.reorientVertices can compute normals if needed.
+        // Let's check what createGeodesicSphereVertices returns. Usually position, normal, texcoord, indices.
+        // According to TWGL docs, it returns position, normal, texcoord, indices. So normals should be there.
+
+        this.spikesBufferInfo = twgl.createBufferInfoFromArrays(gl, globuleArrays);
         this.spikesVAO = twgl.createVAOAndSetAttributes(gl, this.spikesPrg.attribSetters, this.spikesBufferInfo.attribs, this.spikesBufferInfo.indices);
-        this.spikesWorldMatrix = mat4.create();
+        this.spikesWorldMatrix = mat4.create(); // This can be used to position/scale the globule if needed
+
         this.groundBufferInfo = twgl.primitives.createDiscBufferInfo(gl, 1.3, 8);
         this.groundVAO = twgl.createVAOAndSetAttributes(gl, this.groundPrg.attribSetters, this.groundBufferInfo.attribs, this.groundBufferInfo.indices);
         this.groundWorldMatrix = mat4.create();
@@ -198,8 +231,8 @@ export class Sketch {
         this.outFBO = twgl.createFramebufferInfo(gl, [{attachment: this.textures.position2},{attachment: this.textures.velocity2}], this.textureSize, this.textureSize);
         this.indices1FBO = twgl.createFramebufferInfo(gl, [{attachment: this.textures.indices1}], this.textureSize, this.textureSize);
         this.indices2FBO = twgl.createFramebufferInfo(gl, [{attachment: this.textures.indices2}], this.textureSize, this.textureSize);
-        this.offsetFBO = twgl.createFramebufferInfo(gl, [{attachment: this.textures.offset}], this.cellSideCount, this.cellSideCount);
-        this.heightMapFBO = twgl.createFramebufferInfo(gl, [{attachment: this.textures.heightMap}], this.heightMapSize, this.heightMapSize);
+        this.offsetFBO = twgl.createFramebufferInfo(gl, [{attachment: this.textures.offset}], this.offsetTextureSide, this.offsetTextureSide);
+        // this.heightMapFBO = twgl.createFramebufferInfo(gl, [{attachment: this.textures.heightMap}], this.heightMapSize, this.heightMapSize); // REMOVED
 
         this.#initEvents();
         this.#updateSimulationParams();
@@ -273,25 +306,46 @@ export class Sketch {
          this.logNumParticles = Math.log2(this.textureSize);
          this.totalSortSteps = ((this.logNumParticles + this.logNumParticles) * (this.logNumParticles + this.logNumParticles + 1)) / 2;
 
-         // define the cell sizes
-         // use a fixed cell side count for this project
-         this.cellSideCount = 11;
-         this.numCells = this.cellSideCount * this.cellSideCount;
+         // define the cell sizes for 3D grid
+         this.cellDivisions = 11; // Number of divisions along each axis (X, Y, Z)
+         this.numCells = this.cellDivisions * this.cellDivisions * this.cellDivisions;
+         this.particleGridDimensions = vec3.fromValues(this.cellDivisions, this.cellDivisions, this.cellDivisions);
 
-         console.log('number of cells:', this.numCells);
+         // Dimensions for the 2D texture used to store 1D offsets for the 3D grid
+         this.offsetTextureSide = Math.ceil(Math.sqrt(this.numCells));
+         this.offsetTextureDimensions = vec2.fromValues(this.offsetTextureSide, this.offsetTextureSide);
 
-         // heightmap size
-         this.heightMapSize = this.planeResolution * 2;
+         console.log('Number of cell divisions per axis:', this.cellDivisions);
+         console.log('Total number of cells (3D):', this.numCells);
+         console.log('Offset texture dimensions (2D):', this.offsetTextureDimensions);
+
+         // heightmap size // REMOVED
+         // this.heightMapSize = this.geometryResolution * 2; // Was planeResolution
 
          const initVelocities = new Float32Array(this.NUM_PARTICLES * 4);
          const initForces = new Float32Array(this.NUM_PARTICLES * 4);
          const initPositions = new Float32Array(this.NUM_PARTICLES * 4);
+         const initialSphereRadius = 0.5; // Initial radius for particle distribution
 
          for(let i=0; i<this.NUM_PARTICLES; ++i) {
-             initVelocities[i * 4 + 0] = 0;
-             initVelocities[i * 4 + 1] = 0;
-             initPositions[i * 4 + 0] = Math.random() * 2 - 1;
-             initPositions[i * 4 + 1] = Math.random() * 2 - 1;
+             initVelocities[i * 4 + 0] = 0; // vx
+             initVelocities[i * 4 + 1] = 0; // vy
+             initVelocities[i * 4 + 2] = 0; // vz
+             initVelocities[i * 4 + 3] = 0; // vw (unused)
+
+            // Distribute particles uniformly within a sphere
+            let x, y, z, d2;
+            do {
+                x = Math.random() * 2 - 1; // -1 to 1
+                y = Math.random() * 2 - 1; // -1 to 1
+                z = Math.random() * 2 - 1; // -1 to 1
+                d2 = x*x + y*y + z*z;
+            } while (d2 > 1); // Ensure points are inside the unit sphere
+
+            initPositions[i * 4 + 0] = x * initialSphereRadius;
+            initPositions[i * 4 + 1] = y * initialSphereRadius;
+            initPositions[i * 4 + 2] = z * initialSphereRadius;
+            initPositions[i * 4 + 3] = 0; // w (unused or for other attributes)
          }
 
          // empty offset texture
@@ -320,11 +374,11 @@ export class Sketch {
          }
 
          this.offsetTextureOptions = {
-             ...defaultOptions,
-             width: this.cellSideCount,
-             height: this.cellSideCount,
-             format: gl.RED_INTEGER,
-             internalFormat: gl.R16UI,
+             ...defaultOptions, // Includes min: gl.NEAREST, mag: gl.NEAREST
+             width: this.offsetTextureSide,
+             height: this.offsetTextureSide,
+             format: gl.RED_INTEGER, // Storing cell head index (uint16)
+             internalFormat: gl.R16UI, // Max particle index can be NUM_PARTICLES
              wrap: gl.CLAMP_TO_EDGE
          }
 
@@ -351,17 +405,17 @@ export class Sketch {
              offset: {
                  ...this.offsetTextureOptions,
                  src: this.initialOffsetTextureData,
-             },
-             heightMap: {
-                min: isIOS ? gl.NEAREST : gl.LINEAR,
-                mag: isIOS ? gl.NEAREST : gl.LINEAR,
-                wrap: gl.CLAMP_TO_EDGE,
-                width: this.heightMapSize,
-                height: this.heightMapSize,
-                format: gl.RED,
-                internalFormat: gl.R32F,
-                src: new Float32Array(this.heightMapSize * this.heightMapSize)
-            },
+             }
+            // heightMap: { // REMOVED
+            //    min: isIOS ? gl.NEAREST : gl.LINEAR,
+            //    mag: isIOS ? gl.NEAREST : gl.LINEAR,
+            //    wrap: gl.CLAMP_TO_EDGE,
+            //    width: this.heightMapSize,
+            //    height: this.heightMapSize,
+            //    format: gl.RED,
+            //    internalFormat: gl.R32F,
+            //    src: new Float32Array(this.heightMapSize * this.heightMapSize)
+            // },
          });
 
          this.currentPositionTexture = this.textures.position2;
@@ -387,6 +441,7 @@ export class Sketch {
         sim.addInput(this.simulationParams, 'REST_DENS', { min: 0.1, max: 5, });
         sim.addInput(this.simulationParams, 'GAS_CONST', { min: 10, max: 500, });
         sim.addInput(this.simulationParams, 'VISC', { min: 1, max: 20, });
+        sim.addInput(this.simulationParams, 'COHESION_STRENGTH', { min: 0.0, max: 0.5, step: 0.001, label: 'Cohesion' });
         sim.addInput(this.simulationParams, 'STEPS', { min: 0, max: 6, step: 1 });
 
         const pointer = this.pane.addFolder({ title: 'Pointer' });
@@ -396,8 +451,23 @@ export class Sketch {
         //const interaction = this.pane.addFolder({ title: 'Interaction' });
         //interaction.addInput(this, 'ZOOM', { min: 0, max: 1, });
 
+        const geo = this.pane.addFolder({ title: 'Globule Geometry' });
+        geo.addInput(this, 'geometryResolution', { min: 1, max: 7, step: 1, label: 'Subdivisions' })
+            .on('change', () => {
+                // Regenerate icosphere mesh - requires more complex handling to update buffers
+                console.warn("geometryResolution changed. Runtime regeneration not implemented. Re-init for changes to take effect.");
+            });
+        geo.addInput(this.displacementParams, 'influenceRadius', { min: 0.01, max: 3.0, step: 0.01, label: 'Influence Radius' });
+        geo.addInput(this.displacementParams, 'displacementFactor', { min: 0.0, max: 0.5, step: 0.001, label: 'Displacement Factor' });
+
+
         sim.on('change', () => this.#updateSimulationParams());
         pointer.on('change', () => this.pointerParamsNeedUpdate = true);
+        // No specific 'change' event needed for displacementParams as they are read directly in render.
+
+        const audioPane = this.pane.addFolder({ title: 'Audio Reactivity' });
+        audioPane.addInput(this.audioReactiveParams, 'displacementBoost', { min: 0.0, max: 0.5, step: 0.001, label: 'Displacement Boost' });
+        audioPane.addInput(this.audioReactiveParams, 'agitationStrength', { min: 0.0, max: 0.5, step: 0.001, label: 'Agitation Strength' });
     }
 
     #updatePointer() {
@@ -418,23 +488,32 @@ export class Sketch {
             twgl.setBlockUniforms(
                 this.simulationParamsUBO,
                 {
-                    ...this.simulationParams,
-                    CELL_TEX_SIZE: [this.cellSideCount, this.cellSideCount],
-                    CELL_SIZE: this.simulationParams.H
+                    ...this.simulationParams, // Contains DOMAIN_SCALE (vec3), H, MASS, etc.
+                    PARTICLE_GRID_DIMS: [this.cellDivisions, this.cellDivisions, this.cellDivisions],
+                    OFFSET_TEX_DIMS: [this.offsetTextureSide, this.offsetTextureSide],
+                    CELL_SIZE: this.simulationParams.H // CELL_SIZE is H from simParams
                 }
             );
-            twgl.setUniformBlock(gl, this.pressurePrg, this.simulationParamsUBO);
+            // This UBO is used by pressurePrg and forcePrg.
+            // Binding it once should be enough if they share the exact same UBO structure.
+            // However, the original code sets it for pressurePrg then binds for others.
+            // Let's ensure it's available for both.
+            twgl.bindUniformBlock(gl, this.pressurePrg, this.simulationParamsUBO); // Bind after setting
+            twgl.bindUniformBlock(gl, this.forcePrg, this.simulationParamsUBO);   // Bind for force program too
             this.simulationParamsNeedUpdate = false;
         } else {
+            // If not updated, still need to bind it to relevant programs
             twgl.bindUniformBlock(gl, this.pressurePrg, this.simulationParamsUBO);
+            twgl.bindUniformBlock(gl, this.forcePrg, this.simulationParamsUBO);
         }
 
 
         // calculate density and pressure for every particle
         gl.useProgram(this.pressurePrg.program);
+        // SimulationParams UBO already bound
         twgl.bindFramebufferInfo(gl, this.pressureFBO);
         gl.bindVertexArray(this.quadVAO);
-        twgl.setUniforms(this.pressurePrg, {
+        twgl.setUniforms(this.pressurePrg, { // Other uniforms for pressurePrg
             u_positionTexture: this.inFBO.attachments[0],
             u_indicesTexture: this.currentIndicesTexture,
             u_offsetTexture: this.textures.offset,
@@ -444,15 +523,15 @@ export class Sketch {
 
         // calculate pressure-, viscosity- and boundary forces for every particle
         gl.useProgram(this.forcePrg.program);
+        // SimulationParams UBO already bound
         twgl.bindFramebufferInfo(gl, this.forceFBO);
-        twgl.setUniforms(this.forcePrg, {
+        twgl.setUniforms(this.forcePrg, { // Other uniforms for forcePrg
             u_densityPressureTexture: this.pressureFBO.attachments[0],
             u_positionTexture: this.inFBO.attachments[0],
             u_velocityTexture: this.inFBO.attachments[1],
             u_indicesTexture: this.currentIndicesTexture,
-            u_offsetTexture: this.textures.offset,
-            u_cellTexSize: [this.cellSideCount, this.cellSideCount],
-            u_cellSize: this.simulationParams.H,
+            u_offsetTexture: this.textures.offset
+            // Removed u_cellTexSize and u_cellSize, as they are now in SimulationParamsUBO
         });
         twgl.drawBufferInfo(gl, this.quadBufferInfo);
 
@@ -466,11 +545,12 @@ export class Sketch {
             u_forceTexture: this.forceFBO.attachments[0],
             u_densityPressureTexture: this.pressureFBO.attachments[0],
             u_pointerPos: this.pointerLerp,
-            u_pointerVelocity: this.pointerLerpDelta,
+            u_pointerVelocity: this.pointerLerpDelta, // vec2, for 2D pointer
             u_dt: deltaTime,
             u_frames: this.#frames,
             u_zoom: this.ZOOM,
-            u_domainScale: this.domainScale
+            u_domainScale: this.domainScale, // This is already a vec3 from resize()
+            u_audioAgitationStrength: this.currentAudioAgitation
         });
         twgl.setBlockUniforms(
             this.pointerParamsUBO,
@@ -504,9 +584,9 @@ export class Sketch {
         gl.bindVertexArray(this.quadVAO);
         twgl.setUniforms(this.indicesPrg, {
             u_positionTexture: this.currentPositionTexture,
-            u_cellTexSize: [this.cellSideCount, this.cellSideCount],
-            u_cellSize: this.simulationParams.H,
-            u_domainScale: this.domainScale,
+            u_particleGridDims: [this.cellDivisions, this.cellDivisions, this.cellDivisions], // ivec3
+            u_cellSize: this.simulationParams.H, // float
+            u_domainScale: this.domainScale,     // vec3
         });
         twgl.drawBufferInfo(gl, this.quadBufferInfo);
 
@@ -564,42 +644,59 @@ export class Sketch {
         this.currentIndicesTexture = sortOutFBO.attachments[0];
     }
 
-    #renderHeightMap() {
-        /** @type {WebGLRenderingContext} */
-        const gl = this.gl;
+    // #renderHeightMap() { // REMOVED - Displacement is now in spikes.vert.glsl
+    //     /** @type {WebGLRenderingContext} */
+    //     const gl = this.gl;
 
-        // draw height map
-        gl.useProgram(this.heightMapPrg.program);
-        twgl.bindFramebufferInfo(gl, this.heightMapFBO);
-        gl.disable(gl.CULL_FACE);
-        gl.disable(gl.DEPTH_TEST);
-        gl.disable(gl.BLEND);
-        gl.bindVertexArray(this.quadVAO);
-        twgl.setUniforms(this.heightMapPrg, {
-            u_particlePosTexture: this.currentPositionTexture,
-            u_heightFactor: this.#remapZoomForHeight(this.ZOOM),
-            u_scale: this.#remapHeightMapZoomScale(this.ZOOM),
-            u_smoothFactor: this.#remapSmoothFactorZoom(this.ZOOM),
-            u_spikeFactor: this.#remapSpikeFactorZoom(this.ZOOM)
-        });
-        twgl.drawBufferInfo(gl, this.quadBufferInfo);
-    }
+    //     // draw height map
+    //     gl.useProgram(this.heightMapPrg.program);
+    //     twgl.bindFramebufferInfo(gl, this.heightMapFBO);
+    //     gl.disable(gl.CULL_FACE);
+    //     gl.disable(gl.DEPTH_TEST);
+    //     gl.disable(gl.BLEND);
+    //     gl.bindVertexArray(this.quadVAO);
+    //     twgl.setUniforms(this.heightMapPrg, {
+    //         u_particlePosTexture: this.currentPositionTexture,
+    //         u_heightFactor: this.#remapZoomForHeight(this.ZOOM),
+    //         u_scale: this.#remapHeightMapZoomScale(this.ZOOM),
+    //         u_smoothFactor: this.#remapSmoothFactorZoom(this.ZOOM),
+    //         u_spikeFactor: this.#remapSpikeFactorZoom(this.ZOOM)
+    //     });
+    //     twgl.drawBufferInfo(gl, this.quadBufferInfo);
+    // }
 
     #animate(deltaTime) {
         this.#updatePointer();
 
+        let audioReactiveValue = 0;
+        if (this.audioControl.isInitialized && this.audioControl.audioContext) { // Check audioContext for full init
+            const rawAudioValue = this.audioControl.getValue();
+            audioReactiveValue = rawAudioValue === -1 ? 0 : rawAudioValue;
+        }
+
+        // Modulate displacement factor by audio
+        // this.displacementParams.displacementFactor is the base value from Tweakpane
+        this.currentDisplacementFactor = this.displacementParams.displacementFactor + (audioReactiveValue * this.audioReactiveParams.displacementBoost);
+
+        // Calculate audio agitation strength
+        this.currentAudioAgitation = audioReactiveValue * this.audioReactiveParams.agitationStrength;
+
+
         if (this.isEntryAnimationDone) {
-            // get the latest audio control value
-            let targetZoomOffset = this.audioControl.getValue(); // [0,1]
-            targetZoomOffset = targetZoomOffset === -1 ? 0 : targetZoomOffset;
+            // Existing ZOOM logic based on audio for shading effects
+            let targetZoomOffset = audioReactiveValue; // Already fetched and defaults to 0
             this.targetZoomLerp += (targetZoomOffset - this.targetZoomLerp) / 10;
-            // wobble the zoom factor by the offset from the audio control value
             const deltaZoomOffset = (this.zoomOffset - this.targetZoomLerp);
             this.zoomOffsetMomentum -= deltaZoomOffset / 50;
             this.zoomOffsetMomentum *= 0.92;
             this.zoomOffset += this.zoomOffsetMomentum;
-            if (this.audioControl.isInitialized) this.ZOOM = 0.5 - this.zoomOffset / 2;
-        } else {
+            if (this.audioControl.isInitialized && this.audioControl.audioContext) {
+                 this.ZOOM = 0.5 - this.zoomOffset / 2;
+            } else {
+                // Default zoom if audio not fully up, or rely on entry animation's setting
+                // This branch might need refinement based on desired non-audio behavior for ZOOM
+            }
+        } else { // Entry animation phase for ZOOM
 
             if (this.entryProgress >= this.entryDelay) {
                 const frameProgress = (this.entryProgress - this.entryDelay);
@@ -645,7 +742,7 @@ export class Sketch {
             this.#simulate(deltaTime);
         }
 
-        this.#renderHeightMap();
+        // this.#renderHeightMap(); // REMOVED
     }
 
     #render() {
@@ -679,10 +776,18 @@ export class Sketch {
             u_worldMatrix: this.spikesWorldMatrix,
             u_viewMatrix: this.camera.matrices.view,
             u_projectionMatrix: this.camera.matrices.projection,
-            u_heightMapTexture: this.textures.heightMap,
-            u_zoom: this.ZOOM,
+            // u_heightMapTexture: this.textures.heightMap, // REMOVED
+            u_zoom: this.ZOOM, // Still used by fluidShading, might need to rethink its role
             u_cameraPosition: this.camera.position,
-            u_envMapTexture: this.envMapTexture
+            u_envMapTexture: this.envMapTexture,
+
+            // New uniforms for displacement in spikes.vert.glsl
+            u_particlePosTexture: this.currentPositionTexture,
+            u_domainScale: this.domainScale,
+            u_numParticles: this.NUM_PARTICLES,
+            u_particleTexSize: [this.textureSize, this.textureSize],
+            u_influenceRadius: this.displacementParams.influenceRadius, // Base radius from Tweakpane
+            u_displacementFactor: this.currentDisplacementFactor // Modulated by audio
         });
         gl.bindVertexArray(this.spikesVAO);
         gl.drawElements(gl.TRIANGLES, this.spikesBufferInfo.numElements, gl.UNSIGNED_SHORT, 0);
