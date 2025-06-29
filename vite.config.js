@@ -5,9 +5,7 @@ import path from 'path'
 export default defineConfig({
     root: './src',
     server: {
-        open: false,
-        host: '0.0.0.0',
-        port: 3002
+        open: true
     },
     plugins: [glsl({
         exclude: undefined,                         // File paths/extensions to ignore

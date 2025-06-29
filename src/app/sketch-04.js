@@ -181,7 +181,7 @@ export class Sketch {
         this.#initTextures();
 
         // Setup Programs
-        this.drawPrg = twgl.createProgramInfo(gl, [drawVert, drawFrag]);
+        // this.drawPrg = twgl.createProgramInfo(gl, [drawVert, drawFrag]); // Temporarily disabled due to shader errors in draw.vert.glsl
         this.integratePrg = twgl.createProgramInfo(gl, [integrateVert, integrateFrag]);
         this.pressurePrg = twgl.createProgramInfo(gl, [pressureVert, pressureFrag]);
         this.forcePrg = twgl.createProgramInfo(gl, [forceVert, forceFrag]);
@@ -349,8 +349,9 @@ export class Sketch {
          }
 
          // empty offset texture
-         this.initialOffsetTextureData = new Uint16Array(this.numCells);
-         this.initialOffsetTextureData.fill(Number.MAX_VALUE);
+         // Size it to the full 2D texture dimension used for storing offsets
+         this.initialOffsetTextureData = new Uint16Array(this.offsetTextureSide * this.offsetTextureSide);
+         this.initialOffsetTextureData.fill(Number.MAX_VALUE); // Fill with a large value indicating empty/unprocessed
 
          const defaultOptions = {
              width: this.textureSize,
@@ -394,13 +395,13 @@ export class Sketch {
              position2: { ...defaultVectorTexOptions, src: [...initPositions] },
              velocity1: { ...defaultVectorTexOptions, src: [...initVelocities] },
              velocity2: { ...defaultVectorTexOptions, src: [...initVelocities] },
-             indices1: {
-                 ...defaultIndicesTexOptions,
-                 src: new Uint16Array(this.NUM_PARTICLES * 4)
+             indices1: { // Stores uvec2 (cellId, particleOriginalIndex)
+                 ...defaultIndicesTexOptions, // format: gl.RG_INTEGER, internalFormat: gl.RG16UI
+                 src: new Uint16Array(this.NUM_PARTICLES * 2) // NUM_PARTICLES texels, each RG (2 components)
              },
-             indices2: {
+             indices2: { // Same as indices1
                  ...defaultIndicesTexOptions,
-                 src: new Uint16Array(this.NUM_PARTICLES * 4)
+                 src: new Uint16Array(this.NUM_PARTICLES * 2)
              },
              offset: {
                  ...this.offsetTextureOptions,

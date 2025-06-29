@@ -42,7 +42,8 @@ float noise(vec2 p){
 
 void main() {
     ivec2 particleTexDimensions = textureSize(u_positionTexture, 0);
-    vec4 domainScale = vec4(u_domainScale, 0., 0.);
+    // u_domainScale is vec3. This local domainScale is used for 2D pointer interaction.
+    vec4 domainScale = vec4(u_domainScale.xy, 0.0, 0.0);
 
     vec4 pi = texture(u_positionTexture, v_uv); // pi.xyz is 3D position
     vec4 vi = texture(u_velocityTexture, v_uv); // vi.xyz is 3D velocity

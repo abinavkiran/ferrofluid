@@ -19,14 +19,14 @@ layout(std140) uniform u_SimulationParams {
     float POLY6;
     float SPIKY_GRAD;
     float VISC_LAP;
-    float POINTER_RADIUS;
-    float POINTER_STRENGTH;
+    // float POINTER_RADIUS; // These are not part of SimulationParams in JS, they are in PointerParams UBO
+    // float POINTER_STRENGTH;
     int PARTICLE_COUNT;
     vec3 DOMAIN_SCALE;
     ivec3 PARTICLE_GRID_DIMS;
     ivec2 OFFSET_TEX_DIMS;
     float CELL_SIZE;
-    float COHESION_STRENGTH;  // New cohesion parameter
+    float COHESION_STRENGTH;
 };
 
 in vec2 v_uv;
